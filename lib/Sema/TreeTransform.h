@@ -10144,10 +10144,6 @@ TreeTransform<Derived>::TransformCXXTemporaryObjectExpr(
 template<typename Derived>
 ExprResult
 TreeTransform<Derived>::TransformLambdaExpr(LambdaExpr *E) {
-  //E->viewAST();
-  llvm::errs() << "AST before TransformLambdaExpr\n";
-  E->dumpColor();
-
   // Transform any init-capture expressions before entering the scope of the
   // lambda body, because they are not semantically within that scope.
   typedef std::pair<ExprResult, QualType> InitCaptureInfoTy;
@@ -10390,10 +10386,6 @@ TreeTransform<Derived>::TransformLambdaExpr(LambdaExpr *E) {
   //                                 &LSICopy);
   auto e = getSema().BuildLambdaExpr(E->getLocStart(), Body.get()->getLocEnd(),
                                      &LSICopy);
-  //E->viewAST();
-  llvm::errs() << "AST after TransformLambdaExpr\n";
-  e.get()->dumpColor();
-  llvm::errs() << "End TransformLambdaExpr\n";
   return e;
 }
 
