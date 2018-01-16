@@ -469,6 +469,17 @@ void EmitAssemblyHelper::CreatePasses(legacy::PassManager &MPM,
   }
 
   PMBuilder.populateFunctionPassManager(FPM);
+  // Since llvm.memcpy intrinsics with potential mixed address spaces would
+  // choke current Xilinx xocc compiler, the EnableLoopIdiom flag here is set
+  // to false for not executing "loop idiom" pass when compiling souce code
+  // of SYCL kernel.
+  // And Since argument promotion can only be done with GEP instructions that
+  // only used by loads. If llvm.memcpy intrinsics, there will always be a
+  // cast instruction before to cast the pointer, so for the host code, the
+  // EnableLoopIdiom flag here force skipping "loop idiom" pass. The pass will
+  // be executed after "SYCL arguments flattening" pass.
+  if (LangOpts.SYCL)
+    PMBuilder.EnableLoopIdiom = false;
   PMBuilder.populateModulePassManager(MPM);
 }
 
