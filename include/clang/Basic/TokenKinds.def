@@ -534,7 +534,6 @@ KEYWORD(__unaligned                 , KEYMS)
 KEYWORD(__super                     , KEYMS)
 
 // OpenCL address space qualifiers
-<<<<<<< HEAD
 KEYWORD(__global                    , KEYOPENCLC|KEYOPENCLCXX|KEYSYCL)
 KEYWORD(__local                     , KEYOPENCLC|KEYOPENCLCXX|KEYSYCL)
 KEYWORD(__constant                  , KEYOPENCLC|KEYOPENCLCXX|KEYSYCL)
