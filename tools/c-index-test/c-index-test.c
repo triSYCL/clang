@@ -64,7 +64,7 @@ extern char *basename(const char *);
 extern char *dirname(char *);
 #endif
 
-/** \brief Return the default parsing options. */
+/** Return the default parsing options. */
 static unsigned getDefaultParsingOptions() {
   unsigned options = CXTranslationUnit_DetailedPreprocessingRecord;
 
@@ -82,6 +82,8 @@ static unsigned getDefaultParsingOptions() {
     options |= CXTranslationUnit_CreatePreambleOnFirstParse;
   if (getenv("CINDEXTEST_KEEP_GOING"))
     options |= CXTranslationUnit_KeepGoing;
+  if (getenv("CINDEXTEST_LIMIT_SKIP_FUNCTION_BODIES_TO_PREAMBLE"))
+    options |= CXTranslationUnit_LimitSkipFunctionBodiesToPreamble;
 
   return options;
 }
@@ -149,7 +151,7 @@ static void ModifyPrintingPolicyAccordingToEnv(CXPrintingPolicy Policy) {
   }
 }
 
-/** \brief Returns 0 in case of success, non-zero in case of a failure. */
+/** Returns 0 in case of success, non-zero in case of a failure. */
 static int checkForErrors(CXTranslationUnit TU);
 
 static void describeLibclangFailure(enum CXErrorCode Err) {
@@ -232,6 +234,7 @@ static int parse_remapped_files_with_opt(const char *opt_name,
   *unsaved_files
     = (struct CXUnsavedFile *)malloc(sizeof(struct CXUnsavedFile) *
                                      *num_unsaved_files);
+  assert(*unsaved_files);
   for (i = 0; i != *num_unsaved_files; ++i) {
     struct CXUnsavedFile *unsaved = *unsaved_files + i;
     const char *arg_string = argv[arg_indices[i]] + prefix_len;
@@ -267,6 +270,7 @@ static int parse_remapped_files_with_opt(const char *opt_name,
 
     /* Read the contents of the file we're remapping to. */
     contents = (char *)malloc(unsaved->Length + 1);
+    assert(contents);
     if (fread(contents, 1, unsaved->Length, to_file) != unsaved->Length) {
       fprintf(stderr, "error: unexpected %s reading 'to' file %s\n",
               (feof(to_file) ? "EOF" : "error"), sep + 1);
@@ -286,6 +290,7 @@ static int parse_remapped_files_with_opt(const char *opt_name,
     /* Copy the file name that we're remapping from. */
     filename_len = sep - arg_string;
     filename = (char *)malloc(filename_len + 1);
+    assert(filename);
     memcpy(filename, arg_string, filename_len);
     filename[filename_len] = 0;
     unsaved->Filename = filename;
@@ -340,6 +345,7 @@ static int parse_remapped_files_with_try(int try_idx,
     = (struct CXUnsavedFile *)realloc(unsaved_files_no_try_idx,
                                       sizeof(struct CXUnsavedFile) *
                                         *num_unsaved_files);
+  assert(*unsaved_files);
   memcpy(*unsaved_files + num_unsaved_files_no_try_idx,
          unsaved_files_try_idx, sizeof(struct CXUnsavedFile) *
             num_unsaved_files_try_idx);
@@ -658,7 +664,7 @@ static void ValidateCommentXML(const char *Str, const char *CommentSchemaFile) {
     printf(" CommentXMLValid");
   else if (status > 0) {
     xmlErrorPtr Error = xmlGetLastError();
-    printf(" CommentXMLInvalid [not vaild XML: %s]", Error->message);
+    printf(" CommentXMLInvalid [not valid XML: %s]", Error->message);
   } else
     printf(" libXMLError");
 
@@ -2169,6 +2175,7 @@ int parse_file_line_column(const char *input, char **filename, unsigned *line,
 
   /* Copy the file name. */
   *filename = (char*)malloc(last_colon - input + 1);
+  assert(*filename);
   memcpy(*filename, input, last_colon - input);
   (*filename)[last_colon - input] = 0;
   return 0;
@@ -2263,8 +2270,33 @@ static void print_completion_string(CXCompletionString completion_string,
 
 }
 
-static void print_completion_result(CXCompletionResult *completion_result,
+static void print_line_column(CXSourceLocation location, FILE *file) {
+    unsigned line, column;
+    clang_getExpansionLocation(location, NULL, &line, &column, NULL);
+    fprintf(file, "%d:%d", line, column);
+}
+
+static void print_token_range(CXTranslationUnit translation_unit,
+                              CXSourceLocation start, FILE *file) {
+  CXToken *token = clang_getToken(translation_unit, start);
+
+  fprintf(file, "{");
+  if (token != NULL) {
+    CXSourceRange token_range = clang_getTokenExtent(translation_unit, *token);
+    print_line_column(clang_getRangeStart(token_range), file);
+    fprintf(file, "-");
+    print_line_column(clang_getRangeEnd(token_range), file);
+    clang_disposeTokens(translation_unit, token, 1);
+  }
+
+  fprintf(file, "}");
+}
+
+static void print_completion_result(CXTranslationUnit translation_unit,
+                                    CXCodeCompleteResults *completion_results,
+                                    unsigned index,
                                     FILE *file) {
+  CXCompletionResult *completion_result = completion_results->Results + index;
   CXString ks = clang_getCursorKindSpelling(completion_result->CursorKind);
   unsigned annotationCount;
   enum CXCursorKind ParentKind;
@@ -2272,6 +2304,7 @@ static void print_completion_result(CXCompletionResult *completion_result,
   CXString BriefComment;
   CXString Annotation;
   const char *BriefCommentCString;
+  unsigned i;
   
   fprintf(file, "%s:", clang_getCString(ks));
   clang_disposeString(ks);
@@ -2332,7 +2365,19 @@ static void print_completion_result(CXCompletionResult *completion_result,
     fprintf(file, "(brief comment: %s)", BriefCommentCString);
   }
   clang_disposeString(BriefComment);
-  
+
+  for (i = 0; i < clang_getCompletionNumFixIts(completion_results, index);
+       ++i) {
+    CXSourceRange correction_range;
+    CXString FixIt = clang_getCompletionFixIt(completion_results, index, i,
+                                              &correction_range);
+    fprintf(file, " (requires fix-it: ");
+    print_token_range(translation_unit, clang_getRangeStart(correction_range),
+                      file);
+    fprintf(file, " to \"%s\")", clang_getCString(FixIt));
+    clang_disposeString(FixIt);
+  }
+
   fprintf(file, "\n");
 }
 
@@ -2431,6 +2476,8 @@ int perform_code_completion(int argc, const char **argv, int timing_only) {
     completionOptions |= CXCodeComplete_IncludeBriefComments;
   if (getenv("CINDEXTEST_COMPLETION_SKIP_PREAMBLE"))
     completionOptions |= CXCodeComplete_SkipPreamble;
+  if (getenv("CINDEXTEST_COMPLETION_INCLUDE_FIXITS"))
+    completionOptions |= CXCodeComplete_IncludeCompletionsWithFixIts;
   
   if (timing_only)
     input += strlen("-code-completion-timing=");
@@ -2495,7 +2542,7 @@ int perform_code_completion(int argc, const char **argv, int timing_only) {
       clang_sortCodeCompletionResults(results->Results, results->NumResults);
 
       for (i = 0; i != n; ++i)
-        print_completion_result(results->Results + i, stdout);
+        print_completion_result(TU, results, i, stdout);
     }
     n = clang_codeCompleteGetNumDiagnostics(results);
     for (i = 0; i != n; ++i) {
@@ -2578,6 +2625,7 @@ static int inspect_cursor_at(int argc, const char **argv,
   assert(NumLocations > 0 && "Unable to count locations?");
   Locations = (CursorSourceLocation *)malloc(
                                   NumLocations * sizeof(CursorSourceLocation));
+  assert(Locations);
   for (Loc = 0; Loc < NumLocations; ++Loc) {
     const char *input = argv[Loc + 1] + strlen(locations_flag);
     if ((errorCode = parse_file_line_column(input, &Locations[Loc].filename,
@@ -2871,6 +2919,7 @@ static int find_file_refs_at(int argc, const char **argv) {
   assert(NumLocations > 0 && "Unable to count locations?");
   Locations = (CursorSourceLocation *)malloc(
                                   NumLocations * sizeof(CursorSourceLocation));
+  assert(Locations);
   for (Loc = 0; Loc < NumLocations; ++Loc) {
     const char *input = argv[Loc + 1] + strlen("-file-refs-at=");
     if ((errorCode = parse_file_line_column(input, &Locations[Loc].filename,
@@ -2978,6 +3027,7 @@ static int find_file_includes_in(int argc, const char **argv) {
   /* Parse the locations. */
   assert(NumFilenames > 0 && "Unable to count filenames?");
   Filenames = (const char **)malloc(NumFilenames * sizeof(const char *));
+  assert(Filenames);
   for (I = 0; I < NumFilenames; ++I) {
     const char *input = argv[I + 1] + strlen("-file-includes-in=");
     /* Copy the file name. */
@@ -3061,7 +3111,9 @@ typedef struct {
 static ImportedASTFilesData *importedASTs_create() {
   ImportedASTFilesData *p;
   p = malloc(sizeof(ImportedASTFilesData));
+  assert(p);
   p->filenames = malloc(MAX_IMPORTED_ASTFILES * sizeof(const char *));
+  assert(p->filenames);
   p->num_files = 0;
   return p;
 }
@@ -3194,6 +3246,7 @@ static CXIdxClientContainer makeClientContainer(CXClientData *client_data,
   node =
       (IndexDataStringList *)malloc(sizeof(IndexDataStringList) + strlen(name) +
                                     digitCount(line) + digitCount(column) + 2);
+  assert(node);
   newStr = node->data;
   sprintf(newStr, "%s:%d:%d", name, line, column);
 
@@ -3324,6 +3377,27 @@ static void printProtocolList(const CXIdxObjCProtocolRefListInfo *ProtoInfo,
     printCXIndexLoc(ProtoInfo->protocols[i]->loc, client_data);
     printf("\n");
   }
+}
+
+static void printSymbolRole(CXSymbolRole role) {
+  if (role & CXSymbolRole_Declaration)
+    printf(" decl");
+  if (role & CXSymbolRole_Definition)
+    printf(" def");
+  if (role & CXSymbolRole_Reference)
+    printf(" ref");
+  if (role & CXSymbolRole_Read)
+    printf(" read");
+  if (role & CXSymbolRole_Write)
+    printf(" write");
+  if (role & CXSymbolRole_Call)
+    printf(" call");
+  if (role & CXSymbolRole_Dynamic)
+    printf(" dyn");
+  if (role & CXSymbolRole_AddressOf)
+    printf(" addr");
+  if (role & CXSymbolRole_Implicit)
+    printf(" implicit");
 }
 
 static void index_diagnostic(CXClientData client_data,
@@ -3544,9 +3618,11 @@ static void index_indexEntityReference(CXClientData client_data,
   printCXIndexContainer(info->container);
   printf(" | refkind: ");
   switch (info->kind) {
-  case CXIdxEntityRef_Direct: printf("direct"); break;
-  case CXIdxEntityRef_Implicit: printf("implicit"); break;
+    case CXIdxEntityRef_Direct: printf("direct"); break;
+    case CXIdxEntityRef_Implicit: printf("implicit"); break;
   }
+  printf(" | role:");
+  printSymbolRole(info->role);
   printf("\n");
 }
 
@@ -3576,6 +3652,8 @@ static unsigned getIndexOptions(void) {
     index_opts |= CXIndexOpt_IndexFunctionLocalSymbols;
   if (!getenv("CINDEXTEST_DISABLE_SKIPPARSEDBODIES"))
     index_opts |= CXIndexOpt_SkipParsedBodiesInSession;
+  if (getenv("CINDEXTEST_INDEXIMPLICITTEMPLATEINSTANTIATIONS"))
+    index_opts |= CXIndexOpt_IndexImplicitTemplateInstantiations;
 
   return index_opts;
 }
@@ -3772,6 +3850,7 @@ static int index_compile_db(int argc, const char **argv) {
 
     len = strlen(database);
     tmp = (char *) malloc(len+1);
+    assert(tmp);
     memcpy(tmp, database, len+1);
     buildDir = dirname(tmp);
 
@@ -3953,6 +4032,7 @@ int perform_token_annotation(int argc, const char **argv) {
   }
 
   cursors = (CXCursor *)malloc(num_tokens * sizeof(CXCursor));
+  assert(cursors);
   clang_annotateTokens(TU, tokens, num_tokens, cursors);
 
   if (checkForErrors(TU) != 0) {
@@ -4027,6 +4107,7 @@ perform_test_compilation_db(const char *database, int argc, const char **argv) {
 
   len = strlen(database);
   tmp = (char *) malloc(len+1);
+  assert(tmp);
   memcpy(tmp, database, len+1);
   buildDir = dirname(tmp);
 
@@ -4363,10 +4444,10 @@ static void printLocation(CXSourceLocation L) {
   CXFile File;
   CXString FileName;
   unsigned line, column, offset;
-  
+
   clang_getExpansionLocation(L, &File, &line, &column, &offset);
   FileName = clang_getFileName(File);
-  
+
   fprintf(stderr, "%s:%d:%d", clang_getCString(FileName), line, column);
   clang_disposeString(FileName);
 }
