@@ -11,7 +11,6 @@
 #include "CommonArgs.h"
 #include "InputInfo.h"
 #include "clang/Basic/Cuda.h"
-#include "clang/Basic/VirtualFileSystem.h"
 #include "clang/Config/config.h"
 #include "clang/Driver/Compilation.h"
 #include "clang/Driver/Distro.h"
@@ -21,7 +20,9 @@
 #include "llvm/Option/ArgList.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
+#include "llvm/Support/Process.h"
 #include "llvm/Support/Program.h"
+#include "llvm/Support/VirtualFileSystem.h"
 #include <system_error>
 
 using namespace clang::driver;
@@ -56,6 +57,10 @@ static CudaVersion ParseCudaVersionFile(llvm::StringRef V) {
     return CudaVersion::CUDA_90;
   if (Major == 9 && Minor == 1)
     return CudaVersion::CUDA_91;
+  if (Major == 9 && Minor == 2)
+    return CudaVersion::CUDA_92;
+  if (Major == 10 && Minor == 0)
+    return CudaVersion::CUDA_100;
   return CudaVersion::UNKNOWN;
 }
 
@@ -109,7 +114,7 @@ CudaInstallationDetector::CudaInstallationDetector(
     for (const char *Ver : Versions)
       Candidates.emplace_back(D.SysRoot + "/usr/local/cuda-" + Ver);
 
-    if (Distro(D.getVFS()).IsDebian())
+    if (Distro(D.getVFS()).IsDebian() || Distro(D.getVFS()).IsUbuntu())
       // Special case for Debian to have nvidia-cuda-toolkit work
       // out of the box. More info on http://bugs.debian.org/882505
       Candidates.emplace_back(D.SysRoot + "/usr/lib/cuda");
@@ -161,8 +166,8 @@ CudaInstallationDetector::CudaInstallationDetector(
       std::string FilePath = LibDevicePath + "/libdevice.10.bc";
       if (FS.exists(FilePath)) {
         for (const char *GpuArchName :
-             {"sm_20", "sm_30", "sm_32", "sm_35", "sm_50", "sm_52", "sm_53",
-                   "sm_60", "sm_61", "sm_62", "sm_70", "sm_72"}) {
+             {"sm_30", "sm_32", "sm_35", "sm_37", "sm_50", "sm_52", "sm_53",
+              "sm_60", "sm_61", "sm_62", "sm_70", "sm_72", "sm_75"}) {
           const CudaArch GpuArch = StringToCudaArch(GpuArchName);
           if (Version >= MinVersionForCudaArch(GpuArch) &&
               Version <= MaxVersionForCudaArch(GpuArch))
@@ -183,7 +188,7 @@ CudaInstallationDetector::CudaInstallationDetector(
         StringRef GpuArch = FileName.slice(
             LibDeviceName.size(), FileName.find('.', LibDeviceName.size()));
         LibDeviceMap[GpuArch] = FilePath.str();
-        // Insert map entries for specifc devices with this compute
+        // Insert map entries for specific devices with this compute
         // capability. NVCC's choice of the libdevice library version is
         // rather peculiar and depends on the CUDA version.
         if (GpuArch == "compute_20") {
@@ -272,6 +277,47 @@ void CudaInstallationDetector::print(raw_ostream &OS) const {
        << CudaVersionToString(Version) << "\n";
 }
 
+namespace {
+/// Debug info level for the NVPTX devices. We may need to emit different debug
+/// info level for the host and for the device itselfi. This type controls
+/// emission of the debug info for the devices. It either prohibits disable info
+/// emission completely, or emits debug directives only, or emits same debug
+/// info as for the host.
+enum DeviceDebugInfoLevel {
+  DisableDebugInfo,        /// Do not emit debug info for the devices.
+  DebugDirectivesOnly,     /// Emit only debug directives.
+  EmitSameDebugInfoAsHost, /// Use the same debug info level just like for the
+                           /// host.
+};
+} // anonymous namespace
+
+/// Define debug info level for the NVPTX devices. If the debug info for both
+/// the host and device are disabled (-g0/-ggdb0 or no debug options at all). If
+/// only debug directives are requested for the both host and device
+/// (-gline-directvies-only), or the debug info only for the device is disabled
+/// (optimization is on and --cuda-noopt-device-debug was not specified), the
+/// debug directves only must be emitted for the device. Otherwise, use the same
+/// debug info level just like for the host (with the limitations of only
+/// supported DWARF2 standard).
+static DeviceDebugInfoLevel mustEmitDebugInfo(const ArgList &Args) {
+  const Arg *A = Args.getLastArg(options::OPT_O_Group);
+  bool IsDebugEnabled = !A || A->getOption().matches(options::OPT_O0) ||
+                        Args.hasFlag(options::OPT_cuda_noopt_device_debug,
+                                     options::OPT_no_cuda_noopt_device_debug,
+                                     /*Default=*/false);
+  if (const Arg *A = Args.getLastArg(options::OPT_g_Group)) {
+    const Option &Opt = A->getOption();
+    if (Opt.matches(options::OPT_gN_Group)) {
+      if (Opt.matches(options::OPT_g0) || Opt.matches(options::OPT_ggdb0))
+        return DisableDebugInfo;
+      if (Opt.matches(options::OPT_gline_directives_only))
+        return DebugDirectivesOnly;
+    }
+    return IsDebugEnabled ? EmitSameDebugInfoAsHost : DebugDirectivesOnly;
+  }
+  return DisableDebugInfo;
+}
+
 void NVPTX::Assembler::ConstructJob(Compilation &C, const JobAction &JA,
                                     const InputInfo &Output,
                                     const InputInfoList &Inputs,
@@ -303,8 +349,8 @@ void NVPTX::Assembler::ConstructJob(Compilation &C, const JobAction &JA,
 
   ArgStringList CmdArgs;
   CmdArgs.push_back(TC.getTriple().isArch64Bit() ? "-m64" : "-m32");
-  if (Args.hasFlag(options::OPT_cuda_noopt_device_debug,
-                   options::OPT_no_cuda_noopt_device_debug, false)) {
+  DeviceDebugInfoLevel DIKind = mustEmitDebugInfo(Args);
+  if (DIKind == EmitSameDebugInfoAsHost) {
     // ptxas does not accept -g option if optimization is enabled, so
     // we ignore the compiler's -O* options if we want debug info.
     CmdArgs.push_back("-g");
@@ -340,6 +386,8 @@ void NVPTX::Assembler::ConstructJob(Compilation &C, const JobAction &JA,
     // to no optimizations, but ptxas's default is -O3.
     CmdArgs.push_back("-O0");
   }
+  if (DIKind == DebugDirectivesOnly)
+    CmdArgs.push_back("-lineinfo");
 
   // Pass -v to ptxas if it was passed to the driver.
   if (Args.hasArg(options::OPT_v))
@@ -355,11 +403,17 @@ void NVPTX::Assembler::ConstructJob(Compilation &C, const JobAction &JA,
   for (const auto& A : Args.getAllArgValues(options::OPT_Xcuda_ptxas))
     CmdArgs.push_back(Args.MakeArgString(A));
 
-  // In OpenMP we need to generate relocatable code.
-  if (JA.isOffloading(Action::OFK_OpenMP) &&
-      Args.hasFlag(options::OPT_fopenmp_relocatable_target,
-                   options::OPT_fnoopenmp_relocatable_target,
-                   /*Default=*/ true))
+  bool Relocatable = false;
+  if (JA.isOffloading(Action::OFK_OpenMP))
+    // In OpenMP we need to generate relocatable code.
+    Relocatable = Args.hasFlag(options::OPT_fopenmp_relocatable_target,
+                               options::OPT_fnoopenmp_relocatable_target,
+                               /*Default=*/true);
+  else if (JA.isOffloading(Action::OFK_Cuda))
+    Relocatable = Args.hasFlag(options::OPT_fgpu_rdc,
+                               options::OPT_fno_gpu_rdc, /*Default=*/false);
+
+  if (Relocatable)
     CmdArgs.push_back("-c");
 
   const char *Exec;
@@ -368,6 +422,22 @@ void NVPTX::Assembler::ConstructJob(Compilation &C, const JobAction &JA,
   else
     Exec = Args.MakeArgString(TC.GetProgramPath("ptxas"));
   C.addCommand(llvm::make_unique<Command>(JA, *this, Exec, CmdArgs, Inputs));
+}
+
+static bool shouldIncludePTX(const ArgList &Args, const char *gpu_arch) {
+  bool includePTX = true;
+  for (Arg *A : Args) {
+    if (!(A->getOption().matches(options::OPT_cuda_include_ptx_EQ) ||
+          A->getOption().matches(options::OPT_no_cuda_include_ptx_EQ)))
+      continue;
+    A->claim();
+    const StringRef ArchStr = A->getValue();
+    if (ArchStr == "all" || ArchStr == gpu_arch) {
+      includePTX = A->getOption().matches(options::OPT_cuda_include_ptx_EQ);
+      continue;
+    }
+  }
+  return includePTX;
 }
 
 // All inputs to this linker must be from CudaDeviceActions, as we need to look
@@ -387,6 +457,8 @@ void NVPTX::Linker::ConstructJob(Compilation &C, const JobAction &JA,
   CmdArgs.push_back(TC.getTriple().isArch64Bit() ? "-64" : "-32");
   CmdArgs.push_back(Args.MakeArgString("--create"));
   CmdArgs.push_back(Args.MakeArgString(Output.getFilename()));
+  if (mustEmitDebugInfo(Args) == EmitSameDebugInfoAsHost)
+    CmdArgs.push_back("-g");
 
   for (const auto& II : Inputs) {
     auto *A = II.getAction();
@@ -397,6 +469,9 @@ void NVPTX::Linker::ConstructJob(Compilation &C, const JobAction &JA,
            "Device action expected to have associated a GPU architecture!");
     CudaArch gpu_arch = StringToCudaArch(gpu_arch_str);
 
+    if (II.getType() == types::TY_PP_Asm &&
+        !shouldIncludePTX(Args, gpu_arch_str))
+      continue;
     // We need to pass an Arch of the form "sm_XX" for cubin files and
     // "compute_XX" for ptx.
     const char *Arch =
@@ -435,7 +510,7 @@ void NVPTX::OpenMPLinker::ConstructJob(Compilation &C, const JobAction &JA,
     CmdArgs.push_back(Output.getFilename());
   } else
     assert(Output.isNothing() && "Invalid output.");
-  if (Args.hasArg(options::OPT_g_Flag))
+  if (mustEmitDebugInfo(Args) == EmitSameDebugInfoAsHost)
     CmdArgs.push_back("-g");
 
   if (Args.hasArg(options::OPT_v))
@@ -447,6 +522,11 @@ void NVPTX::OpenMPLinker::ConstructJob(Compilation &C, const JobAction &JA,
 
   CmdArgs.push_back("-arch");
   CmdArgs.push_back(Args.MakeArgString(GPUArch));
+
+  // Assume that the directory specified with --libomptarget_nvptx_path
+  // contains the static library libomptarget-nvptx.a.
+  if (const Arg *A = Args.getLastArg(options::OPT_libomptarget_nvptx_path_EQ))
+    CmdArgs.push_back(Args.MakeArgString(Twine("-L") + A->getValue()));
 
   // Add paths specified in LIBRARY_PATH environment variable as -L options.
   addDirectoryList(Args, CmdArgs, "-L", "LIBRARY_PATH");
@@ -540,6 +620,10 @@ void CudaToolChain::addClangTargetOptions(
     if (DriverArgs.hasFlag(options::OPT_fcuda_approx_transcendentals,
                            options::OPT_fno_cuda_approx_transcendentals, false))
       CC1Args.push_back("-fcuda-approx-transcendentals");
+
+    if (DriverArgs.hasFlag(options::OPT_fgpu_rdc, options::OPT_fno_gpu_rdc,
+                           false))
+      CC1Args.push_back("-fgpu-rdc");
   }
 
   if (DriverArgs.hasArg(options::OPT_nocudalib))
@@ -556,19 +640,94 @@ void CudaToolChain::addClangTargetOptions(
     return;
   }
 
-  CC1Args.push_back("-mlink-cuda-bitcode");
+  CC1Args.push_back("-mlink-builtin-bitcode");
   CC1Args.push_back(DriverArgs.MakeArgString(LibDeviceFile));
 
-  if (CudaInstallation.version() >= CudaVersion::CUDA_90) {
-    // CUDA-9 uses new instructions that are only available in PTX6.0
-    CC1Args.push_back("-target-feature");
-    CC1Args.push_back("+ptx60");
-  } else {
-    // Libdevice in CUDA-7.0 requires PTX version that's more recent
-    // than LLVM defaults to. Use PTX4.2 which is the PTX version that
-    // came with CUDA-7.0.
-    CC1Args.push_back("-target-feature");
-    CC1Args.push_back("+ptx42");
+  // Libdevice in CUDA-7.0 requires PTX version that's more recent than LLVM
+  // defaults to. Use PTX4.2 by default, which is the PTX version that came with
+  // CUDA-7.0.
+  const char *PtxFeature = "+ptx42";
+  // TODO(tra): CUDA-10+ needs PTX 6.3 to support new features. However that
+  // requires fair amount of work on LLVM side. We'll keep using PTX 6.1 until
+  // all prerequisites are in place.
+  if (CudaInstallation.version() >= CudaVersion::CUDA_91) {
+    // CUDA-9.1 uses new instructions that are only available in PTX6.1+
+    PtxFeature = "+ptx61";
+  } else if (CudaInstallation.version() >= CudaVersion::CUDA_90) {
+    // CUDA-9.0 uses new instructions that are only available in PTX6.0+
+    PtxFeature = "+ptx60";
+  }
+  CC1Args.append({"-target-feature", PtxFeature});
+  if (DriverArgs.hasFlag(options::OPT_fcuda_short_ptr,
+                         options::OPT_fno_cuda_short_ptr, false))
+    CC1Args.append({"-mllvm", "--nvptx-short-ptr"});
+
+  if (DeviceOffloadingKind == Action::OFK_OpenMP) {
+    SmallVector<StringRef, 8> LibraryPaths;
+
+    if (const Arg *A = DriverArgs.getLastArg(options::OPT_libomptarget_nvptx_path_EQ))
+      LibraryPaths.push_back(A->getValue());
+
+    // Add user defined library paths from LIBRARY_PATH.
+    llvm::Optional<std::string> LibPath =
+        llvm::sys::Process::GetEnv("LIBRARY_PATH");
+    if (LibPath) {
+      SmallVector<StringRef, 8> Frags;
+      const char EnvPathSeparatorStr[] = {llvm::sys::EnvPathSeparator, '\0'};
+      llvm::SplitString(*LibPath, Frags, EnvPathSeparatorStr);
+      for (StringRef Path : Frags)
+        LibraryPaths.emplace_back(Path.trim());
+    }
+
+    // Add path to lib / lib64 folder.
+    SmallString<256> DefaultLibPath =
+        llvm::sys::path::parent_path(getDriver().Dir);
+    llvm::sys::path::append(DefaultLibPath, Twine("lib") + CLANG_LIBDIR_SUFFIX);
+    LibraryPaths.emplace_back(DefaultLibPath.c_str());
+
+    std::string LibOmpTargetName =
+      "libomptarget-nvptx-" + GpuArch.str() + ".bc";
+    bool FoundBCLibrary = false;
+    for (StringRef LibraryPath : LibraryPaths) {
+      SmallString<128> LibOmpTargetFile(LibraryPath);
+      llvm::sys::path::append(LibOmpTargetFile, LibOmpTargetName);
+      if (llvm::sys::fs::exists(LibOmpTargetFile)) {
+        CC1Args.push_back("-mlink-builtin-bitcode");
+        CC1Args.push_back(DriverArgs.MakeArgString(LibOmpTargetFile));
+        FoundBCLibrary = true;
+        break;
+      }
+    }
+    if (!FoundBCLibrary)
+      getDriver().Diag(diag::warn_drv_omp_offload_target_missingbcruntime)
+          << LibOmpTargetName;
+  }
+}
+
+bool CudaToolChain::supportsDebugInfoOption(const llvm::opt::Arg *A) const {
+  const Option &O = A->getOption();
+  return (O.matches(options::OPT_gN_Group) &&
+          !O.matches(options::OPT_gmodules)) ||
+         O.matches(options::OPT_g_Flag) ||
+         O.matches(options::OPT_ggdbN_Group) || O.matches(options::OPT_ggdb) ||
+         O.matches(options::OPT_gdwarf) || O.matches(options::OPT_gdwarf_2) ||
+         O.matches(options::OPT_gdwarf_3) || O.matches(options::OPT_gdwarf_4) ||
+         O.matches(options::OPT_gdwarf_5) ||
+         O.matches(options::OPT_gcolumn_info);
+}
+
+void CudaToolChain::adjustDebugInfoKind(
+    codegenoptions::DebugInfoKind &DebugInfoKind, const ArgList &Args) const {
+  switch (mustEmitDebugInfo(Args)) {
+  case DisableDebugInfo:
+    DebugInfoKind = codegenoptions::NoDebugInfo;
+    break;
+  case DebugDirectivesOnly:
+    DebugInfoKind = codegenoptions::DebugDirectivesOnly;
+    break;
+  case EmitSameDebugInfoAsHost:
+    // Use same debug info level as the host.
+    break;
   }
 }
 

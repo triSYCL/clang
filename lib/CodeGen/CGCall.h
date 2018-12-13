@@ -43,24 +43,24 @@ namespace CodeGen {
 
 /// Abstract information about a function or function prototype.
 class CGCalleeInfo {
-  /// \brief The function prototype of the callee.
+  /// The function prototype of the callee.
   const FunctionProtoType *CalleeProtoTy;
-  /// \brief The function declaration of the callee.
-  const Decl *CalleeDecl;
+  /// The function declaration of the callee.
+  GlobalDecl CalleeDecl;
 
 public:
-  explicit CGCalleeInfo() : CalleeProtoTy(nullptr), CalleeDecl(nullptr) {}
-  CGCalleeInfo(const FunctionProtoType *calleeProtoTy, const Decl *calleeDecl)
+  explicit CGCalleeInfo() : CalleeProtoTy(nullptr), CalleeDecl() {}
+  CGCalleeInfo(const FunctionProtoType *calleeProtoTy, GlobalDecl calleeDecl)
       : CalleeProtoTy(calleeProtoTy), CalleeDecl(calleeDecl) {}
   CGCalleeInfo(const FunctionProtoType *calleeProtoTy)
-      : CalleeProtoTy(calleeProtoTy), CalleeDecl(nullptr) {}
-  CGCalleeInfo(const Decl *calleeDecl)
+      : CalleeProtoTy(calleeProtoTy), CalleeDecl() {}
+  CGCalleeInfo(GlobalDecl calleeDecl)
       : CalleeProtoTy(nullptr), CalleeDecl(calleeDecl) {}
 
   const FunctionProtoType *getCalleeFunctionProtoType() const {
     return CalleeProtoTy;
   }
-  const Decl *getCalleeDecl() const { return CalleeDecl; }
+  const GlobalDecl getCalleeDecl() const { return CalleeDecl; }
   };
 
   /// All available information about a concrete callee.
@@ -171,7 +171,7 @@ public:
     }
     CGCalleeInfo getAbstractInfo() const {
       if (isVirtual())
-        return VirtualInfo.MD.getDecl();
+        return VirtualInfo.MD;
       assert(isOrdinary());
       return AbstractInfo;
     }
@@ -206,21 +206,59 @@ public:
       return cast<llvm::FunctionType>(
           getFunctionPointer()->getType()->getPointerElementType());
     }
+
+    /// If this is a delayed callee computation of some sort, prepare
+    /// a concrete callee.
+    CGCallee prepareConcreteCallee(CodeGenFunction &CGF) const;
   };
 
   struct CallArg {
-    RValue RV;
+  private:
+    union {
+      RValue RV;
+      LValue LV; /// The argument is semantically a load from this l-value.
+    };
+    bool HasLV;
+
+    /// A data-flow flag to make sure getRValue and/or copyInto are not
+    /// called twice for duplicated IR emission.
+    mutable bool IsUsed;
+
+  public:
     QualType Ty;
-    bool NeedsCopy;
-    CallArg(RValue rv, QualType ty, bool needscopy)
-    : RV(rv), Ty(ty), NeedsCopy(needscopy)
-    { }
+    CallArg(RValue rv, QualType ty)
+        : RV(rv), HasLV(false), IsUsed(false), Ty(ty) {}
+    CallArg(LValue lv, QualType ty)
+        : LV(lv), HasLV(true), IsUsed(false), Ty(ty) {}
+    bool hasLValue() const { return HasLV; }
+    QualType getType() const { return Ty; }
+
+    /// \returns an independent RValue. If the CallArg contains an LValue,
+    /// a temporary copy is returned.
+    RValue getRValue(CodeGenFunction &CGF) const;
+
+    LValue getKnownLValue() const {
+      assert(HasLV && !IsUsed);
+      return LV;
+    }
+    RValue getKnownRValue() const {
+      assert(!HasLV && !IsUsed);
+      return RV;
+    }
+    void setRValue(RValue _RV) {
+      assert(!HasLV);
+      RV = _RV;
+    }
+
+    bool isAggregate() const { return HasLV || RV.isAggregate(); }
+
+    void copyInto(CodeGenFunction &CGF, Address A) const;
   };
 
   /// CallArgList - Type for representing both the value and type of
   /// arguments in a call.
   class CallArgList :
-    public SmallVector<CallArg, 16> {
+    public SmallVector<CallArg, 8> {
   public:
     CallArgList() : StackBase(nullptr) {}
 
@@ -244,8 +282,10 @@ public:
       llvm::Instruction *IsActiveIP;
     };
 
-    void add(RValue rvalue, QualType type, bool needscopy = false) {
-      push_back(CallArg(rvalue, type, needscopy));
+    void add(RValue rvalue, QualType type) { push_back(CallArg(rvalue, type)); }
+
+    void addUncopiedAggregate(LValue LV, QualType type) {
+      push_back(CallArg(LV, type));
     }
 
     /// Add all the arguments from another CallArgList to this one. After doing
@@ -294,7 +334,7 @@ public:
     llvm::Instruction *getStackBase() const { return StackBase; }
     void freeArgumentMemory(CodeGenFunction &CGF) const;
 
-    /// \brief Returns if we're using an inalloca struct to pass arguments in
+    /// Returns if we're using an inalloca struct to pass arguments in
     /// memory.
     bool isUsingInAlloca() const { return StackBase; }
 
@@ -316,7 +356,7 @@ public:
   class FunctionArgList : public SmallVector<const VarDecl*, 16> {
   };
 
-  /// ReturnValueSlot - Contains the address where the return value of a 
+  /// ReturnValueSlot - Contains the address where the return value of a
   /// function can be stored, and whether the address is volatile or not.
   class ReturnValueSlot {
     llvm::PointerIntPair<llvm::Value *, 2, unsigned int> Value;
@@ -341,7 +381,7 @@ public:
     Address getValue() const { return Address(Value.getPointer(), Alignment); }
     bool isUnused() const { return Value.getInt() & IS_UNUSED; }
   };
-  
+
 }  // end namespace CodeGen
 }  // end namespace clang
 
