@@ -32,11 +32,12 @@ class LLVM_LIBRARY_VISIBILITY WebAssemblyTargetInfo : public TargetInfo {
 
   bool HasNontrappingFPToInt;
   bool HasSignExt;
+  bool HasExceptionHandling;
 
 public:
   explicit WebAssemblyTargetInfo(const llvm::Triple &T, const TargetOptions &)
       : TargetInfo(T), SIMDLevel(NoSIMD), HasNontrappingFPToInt(false),
-        HasSignExt(false) {
+        HasSignExt(false), HasExceptionHandling(false) {
     NoAsmVariants = true;
     SuitableAlign = 128;
     LargeArrayMinWidth = 128;
@@ -46,9 +47,11 @@ public:
     LongDoubleWidth = LongDoubleAlign = 128;
     LongDoubleFormat = &llvm::APFloat::IEEEquad();
     MaxAtomicPromoteWidth = MaxAtomicInlineWidth = 64;
-    SizeType = UnsignedInt;
-    PtrDiffType = SignedInt;
-    IntPtrType = SignedInt;
+    // size_t being unsigned long for both wasm32 and wasm64 makes mangled names
+    // more consistent between the two.
+    SizeType = UnsignedLong;
+    PtrDiffType = SignedLong;
+    IntPtrType = SignedLong;
   }
 
 protected:
@@ -74,6 +77,7 @@ private:
                             DiagnosticsEngine &Diags) final;
 
   bool isValidCPUName(StringRef Name) const final;
+  void fillValidCPUList(SmallVectorImpl<StringRef> &Values) const final;
 
   bool setCPU(const std::string &Name) final { return isValidCPUName(Name); }
 

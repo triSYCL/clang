@@ -20,7 +20,7 @@
 #include "clang/AST/Attr.h"
 #include "clang/AST/Mangle.h"
 #include "clang/AST/RecordLayout.h"
-#include "clang/Frontend/CodeGenOptions.h"
+#include "clang/Basic/CodeGenOptions.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/LLVMContext.h"
@@ -213,6 +213,19 @@ llvm::MDNode *CodeGenTBAA::getTypeInfo(QualType QTy) {
   // first generate the node for the type and then add that node to the cache.
   llvm::MDNode *TypeNode = getTypeInfoHelper(Ty);
   return MetadataCache[Ty] = TypeNode;
+}
+
+TBAAAccessInfo CodeGenTBAA::getAccessInfo(QualType AccessType) {
+  // Pointee values may have incomplete types, but they shall never be
+  // dereferenced.
+  if (AccessType->isIncompleteType())
+    return TBAAAccessInfo::getIncompleteInfo();
+
+  if (TypeHasMayAlias(AccessType))
+    return TBAAAccessInfo::getMayAliasInfo();
+
+  uint64_t Size = Context.getTypeSizeInChars(AccessType).getQuantity();
+  return TBAAAccessInfo(getTypeInfo(AccessType), Size);
 }
 
 TBAAAccessInfo CodeGenTBAA::getVTablePtrAccessInfo(llvm::Type *VTablePtrType) {

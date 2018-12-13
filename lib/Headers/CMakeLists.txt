@@ -40,6 +40,7 @@ set(files
   __clang_cuda_math_forward_declares.h
   __clang_cuda_runtime_wrapper.h
   cetintrin.h
+  cldemoteintrin.h
   clzerointrin.h
   cpuid.h
   clflushoptintrin.h
@@ -57,6 +58,7 @@ set(files
   immintrin.h
   intrin.h
   inttypes.h
+  invpcidintrin.h
   iso646.h
   limits.h
   lwpintrin.h
@@ -65,16 +67,20 @@ set(files
   mmintrin.h
   mm_malloc.h
   module.modulemap
+  movdirintrin.h
   msa.h
   mwaitxintrin.h
   nmmintrin.h
   opencl-c.h
   pkuintrin.h
   pmmintrin.h
+  pconfigintrin.h
   popcntintrin.h
   prfchwintrin.h
+  ptwriteintrin.h
   rdseedintrin.h
   rtmintrin.h
+  sgxintrin.h
   s390intrin.h
   shaintrin.h
   smmintrin.h
@@ -95,6 +101,8 @@ set(files
   varargs.h
   vecintrin.h
   vpclmulqdqintrin.h
+  waitpkgintrin.h
+  wbnoinvdintrin.h
   wmmintrin.h
   __wmmintrin_aes.h
   __wmmintrin_pclmul.h
@@ -136,7 +144,7 @@ foreach( f ${files} ${cuda_wrapper_files} )
   list(APPEND out_files ${dst})
 endforeach( f )
 
-add_custom_command(OUTPUT ${output_dir}/arm_neon.h 
+add_custom_command(OUTPUT ${output_dir}/arm_neon.h
   DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/arm_neon.h
   COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_BINARY_DIR}/arm_neon.h ${output_dir}/arm_neon.h
   COMMENT "Copying clang's arm_neon.h...")
@@ -148,7 +156,9 @@ add_custom_command(OUTPUT ${output_dir}/arm_fp16.h
 list(APPEND out_files ${output_dir}/arm_fp16.h)
 
 add_custom_target(clang-headers ALL DEPENDS ${out_files})
-set_target_properties(clang-headers PROPERTIES FOLDER "Misc")
+set_target_properties(clang-headers PROPERTIES
+  FOLDER "Misc"
+  RUNTIME_OUTPUT_DIRECTORY "${output_dir}")
 
 install(
   FILES ${files} ${CMAKE_CURRENT_BINARY_DIR}/arm_neon.h
