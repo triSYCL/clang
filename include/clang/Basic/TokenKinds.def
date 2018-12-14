@@ -550,7 +550,7 @@ ALIAS("kernel", __kernel            , KEYOPENCLC|KEYOPENCLCXX)
 // OpenCL access qualifiers
 KEYWORD(__read_only                 , KEYOPENCLC|KEYOPENCLCXX|KEYSYCL)
 KEYWORD(__write_only                , KEYOPENCLC|KEYOPENCLCXX|KEYSYCL)
-KEYWORD(__read_write                , KEYOPENCLC|KEYOPENCLCXX)
+KEYWORD(__read_write                , KEYOPENCLC|KEYOPENCLCXX|KEYSYCL)
 ALIAS("read_only", __read_only      , KEYOPENCLC|KEYOPENCLCXX)
 ALIAS("write_only", __write_only    , KEYOPENCLC|KEYOPENCLCXX)
 ALIAS("read_write", __read_write    , KEYOPENCLC|KEYOPENCLCXX)
