@@ -1013,7 +1013,7 @@ sub RunXcodebuild {
   }
   close(DETECT_XCODE);
 
-  # If --override-compiler is explicitely requested, resort to the old
+  # If --override-compiler is explicitly requested, resort to the old
   # behavior regardless of Xcode version.
   if ($Options{OverrideCompiler}) {
     $oldBehavior = 1;
@@ -1192,7 +1192,7 @@ OPTIONS:
 
    By default, the exit status of scan-build is the same as the executed build
    command. Specifying this option causes the exit status of scan-build to be 1
-   if it found potential bugs and 0 otherwise.
+   if it found potential bugs and the exit status of the build itself otherwise.
 
  --use-cc [compiler path]
  --use-cc=[compiler path]
@@ -1246,7 +1246,7 @@ ADVANCED OPTIONS:
 
  -maxloop <loop count>
 
-   Specifiy the number of times a block can be visited before giving up.
+   Specify the number of times a block can be visited before giving up.
    Default is 4. Increase for more comprehensive coverage at a cost of speed.
 
  -internal-stats
@@ -1878,7 +1878,7 @@ if (defined $Options{OutputFormat}) {
 
     if ($Options{ExitStatusFoundBugs}) {
       exit 1 if ($NumBugs > 0);
-      exit 0;
+      exit $ExitStatus;
     }
   }
 }
